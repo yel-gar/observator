@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
-use common::messages::Message;
+use common::messages::{Message, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
-use quinn::{Connection, Endpoint, ServerConfig};
+use quinn::{Connection, Endpoint, ServerConfig, VarInt};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -55,6 +55,33 @@ pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<S
     Ok(conf)
 }
 
+pub struct Server {
+    addr: SocketAddr,
+    endpoint: Endpoint,
+}
+
+impl Server {
+    pub fn new(host: IpAddr, port: u16, conf: ServerConfig) -> Result<Self> {
+        let addr = SocketAddr::new(host, port);
+        Ok(Server {
+            addr,
+            endpoint: Endpoint::server(conf, addr)?,
+        })
+    }
+
+    pub async fn run(&self) {
+        info!("Starting server...");
+        self.internal_loop().await;
+    }
+
+    async fn internal_loop(&self) {
+        info!("Server successfully started! Listening on {}", self.addr);
+        while let Some(incoming) = self.endpoint.accept().await {
+            todo!()
+        }
+    }
+}
+
 pub async fn run_server(conf: ServerConfig, host: IpAddr, port: u16) -> Result<()> {
     let addr = SocketAddr::new(host, port);
     let endpoint = Endpoint::server(conf, addr)?;
@@ -83,30 +110,12 @@ async fn handler(conn: Connection) {
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
         debug!("Accepting stream");
         tokio::spawn(async move {
-            let bytes = match recv.read_to_end(1024).await {
-                Ok(b) => b,
-                Err(e) => {
-                    error!(error = %e, "Unexpected read error");
-                    return;
+            while let Ok(msg) = recv_msg(&mut recv).await {
+                if let Some(response) = process_message(msg).await {
+                    send_msg(&mut send, response)
+                        .await
+                        .unwrap_or_else(|_| error!("Failed to send message"))
                 }
-            };
-
-            let resp = match Message::deserialize(&bytes) {
-                Ok(m) => process_message(m).await,
-                Err(e) => {
-                    error!(error = %e, "Unable to deserialize message");
-                    return;
-                }
-            };
-
-            if let Some(msg) = resp {
-                let res = send.write_all(&msg.serialize()).await;
-                if let Err(e) = res {
-                    error!(error = %e, message = ?msg, "Error sending response message");
-                }
-            }
-            if let Err(e) = send.finish() {
-                error!(error = %e, "Error finishing send stream")
             }
         });
     }

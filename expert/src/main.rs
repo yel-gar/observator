@@ -2,7 +2,7 @@ pub mod certs;
 
 use crate::certs::CertificateVerifier;
 use anyhow::{Result, anyhow};
-use common::messages::Message;
+use common::messages::{Message, recv_msg, send_msg};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
 use rustls::crypto::ring::default_provider;
@@ -38,16 +38,27 @@ async fn main() -> Result<()> {
     info!("Connected to {target_addr}");
 
     let (mut send, mut recv) = conn.open_bi().await?;
-    send.write_all(&Message::PING.serialize()).await?;
-    send.finish()?;
-    info!("Sent PING");
+    send_msg(&mut send, Message::PING).await?;
 
-    let resp_b = recv.read_to_end(1024).await?;
-    let resp = Message::deserialize(&resp_b)?;
+    let resp = recv_msg(&mut recv).await?;
 
     match resp {
         Message::PONG => {
             info!("Got PONG");
+        }
+
+        other => {
+            error!(?other, "Something weird happened...");
+        }
+    }
+
+    send_msg(&mut send, Message::PING).await?;
+
+    let resp = recv_msg(&mut recv).await?;
+
+    match resp {
+        Message::PONG => {
+            info!("Got PONG 2");
         }
 
         other => {
