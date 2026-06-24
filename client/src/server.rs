@@ -1,13 +1,15 @@
+pub mod data;
+
+use crate::server::data::ServerData;
 use anyhow::{Result, anyhow};
 use common::messages::{Message, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
-use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use tracing::{debug, error, error_span, info, info_span, instrument, Instrument};
-use common::errors::MessageSendError;
+use tracing::{Instrument, debug, error, info, info_span, instrument};
 
 pub const DEFAULT_CERT_PATH: &str = "cert.pem";
 pub const DEFAULT_KEY_PATH: &str = "key.pem";
@@ -59,14 +61,16 @@ pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<S
 struct Server {
     addr: SocketAddr,
     endpoint: Endpoint,
+    data: ServerData,
 }
 
 impl Server {
-    pub fn new(host: IpAddr, port: u16, conf: ServerConfig) -> Result<Self> {
+    pub fn new(host: IpAddr, port: u16, conf: ServerConfig, data: ServerData) -> Result<Self> {
         let addr = SocketAddr::new(host, port);
         Ok(Server {
             addr,
             endpoint: Endpoint::server(conf, addr)?,
+            data,
         })
     }
 
@@ -79,18 +83,22 @@ impl Server {
         info!("Server successfully started! Listening on {}", self.addr);
         while let Some(incoming) = self.endpoint.accept().await {
             let span = info_span!("Incoming connection", addr = %incoming.remote_address());
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
-                        info!("Accepted connection");
-                        let handler = ConnectionHandler::new(conn);
-                        handler.handle().await;
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Error accepting connection");
+            tokio::spawn(
+                async move {
+                    match incoming.await {
+                        Ok(conn) => {
+                            info!("Accepted connection");
+                            let handler = ConnectionHandler::new(conn);
+                            handler.handle().await;
+                            info!("Connection terminated")
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Error accepting connection");
+                        }
                     }
                 }
-            }.instrument(span));
+                .instrument(span),
+            );
         }
     }
 }
@@ -110,7 +118,7 @@ impl ConnectionHandler {
         while let Ok((send, recv)) = self.connection.accept_bi().await {
             debug!("Accepting stream");
             tokio::spawn(async move {
-                let mut handler = StreamHandler::new(recv, send);
+                let handler = StreamHandler::new(recv, send);
                 handler.handle().await;
             });
         }
@@ -138,11 +146,17 @@ impl StreamHandler {
                 });
             }
         }
+        debug!("Finished stream handling");
     }
 }
 
-pub async fn run_server(conf: ServerConfig, host: IpAddr, port: u16) -> Result<()> {
-    let server = Server::new(host, port, conf)?;
+pub async fn run_server(
+    conf: ServerConfig,
+    host: IpAddr,
+    port: u16,
+    data: ServerData,
+) -> Result<()> {
+    let server = Server::new(host, port, conf, data)?;
     server.run().await;
 
     Ok(())
