@@ -1,12 +1,13 @@
 use anyhow::{Result, anyhow};
 use common::messages::{Message, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
-use quinn::{Connection, Endpoint, ServerConfig, VarInt};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, error_span, info, info_span, instrument, Instrument};
+use common::errors::MessageSendError;
 
 pub const DEFAULT_CERT_PATH: &str = "cert.pem";
 pub const DEFAULT_KEY_PATH: &str = "key.pem";
@@ -55,7 +56,7 @@ pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<S
     Ok(conf)
 }
 
-pub struct Server {
+struct Server {
     addr: SocketAddr,
     endpoint: Endpoint,
 }
@@ -77,48 +78,74 @@ impl Server {
     async fn internal_loop(&self) {
         info!("Server successfully started! Listening on {}", self.addr);
         while let Some(incoming) = self.endpoint.accept().await {
-            todo!()
+            let span = info_span!("Incoming connection", addr = %incoming.remote_address());
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        info!("Accepted connection");
+                        let handler = ConnectionHandler::new(conn);
+                        handler.handle().await;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Error accepting connection");
+                    }
+                }
+            }.instrument(span));
+        }
+    }
+}
+
+struct ConnectionHandler {
+    connection: Connection,
+}
+
+impl ConnectionHandler {
+    fn new(connection: Connection) -> Self {
+        Self { connection }
+    }
+
+    #[instrument(skip(self), fields(addr = %self.connection.remote_address()))]
+    async fn handle(self) {
+        debug!("Beginning connection handling");
+        while let Ok((send, recv)) = self.connection.accept_bi().await {
+            debug!("Accepting stream");
+            tokio::spawn(async move {
+                let mut handler = StreamHandler::new(recv, send);
+                handler.handle().await;
+            });
+        }
+    }
+}
+
+struct StreamHandler {
+    recv: RecvStream,
+    send: SendStream,
+}
+
+impl StreamHandler {
+    fn new(recv: RecvStream, send: SendStream) -> Self {
+        Self { recv, send }
+    }
+
+    #[instrument(skip(self), fields(stream_id = %self.recv.id()))]
+    async fn handle(mut self) {
+        while let Ok(msg) = recv_msg(&mut self.recv).await {
+            debug!(?msg, "Received message");
+            let response = process_message(msg).await;
+            if let Some(msg) = response {
+                send_msg(&mut self.send, msg).await.unwrap_or_else(|e| {
+                    error!(%e, "Error sending message");
+                });
+            }
         }
     }
 }
 
 pub async fn run_server(conf: ServerConfig, host: IpAddr, port: u16) -> Result<()> {
-    let addr = SocketAddr::new(host, port);
-    let endpoint = Endpoint::server(conf, addr)?;
-
-    info!("Server listening on {host}:{port}");
-
-    while let Some(incoming) = endpoint.accept().await {
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(connection) => {
-                    info!("Accepted connection from {}", connection.remote_address());
-                    handler(connection).await;
-                }
-                Err(e) => {
-                    error!("Failed connection: {e}")
-                }
-            }
-        });
-    }
+    let server = Server::new(host, port, conf)?;
+    server.run().await;
 
     Ok(())
-}
-
-#[instrument(skip(conn), fields(addr = %conn.remote_address()))]
-async fn handler(conn: Connection) {
-    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-        debug!("Accepting stream");
-        tokio::spawn(async move {
-            while let Ok(msg) = recv_msg(&mut recv).await {
-                if let Some(response) = process_message(msg).await {
-                    send_msg(&mut send, response)
-                        .await
-                        .unwrap_or_else(|_| error!("Failed to send message"))
-                }
-            }
-        });
-    }
 }
 
 #[instrument]
