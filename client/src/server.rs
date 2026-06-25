@@ -229,7 +229,7 @@ async fn process_message(m: Message) -> Option<Message> {
     match m {
         Message::Ping => Some(Message::Pong),
         Message::Pong => None,
-        Message::Ack => None,
+        Message::Ok => None,
         Message::Error(_) => None,
         Message::Authenticated => None,
         Message::Hello(_) => Some(Message::Error("You are already authenticated".to_string())),

@@ -11,7 +11,7 @@ pub enum Message {
     // Shared
     Ping,
     Pong,
-    Ack,
+    Ok,
     Error(String),
 
     // Client

@@ -1,14 +1,10 @@
 pub mod certs;
+pub mod client;
 
-use crate::certs::CertificateVerifier;
-use anyhow::{Result, anyhow};
-use common::messages::{Message, recv_msg, send_msg};
-use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{ClientConfig, Endpoint};
+use crate::client::Client;
+use anyhow::Result;
 use rustls::crypto::ring::default_provider;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tracing::{error, info};
+use secrecy::SecretString;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -20,51 +16,8 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install ring provider");
 
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
-
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
-
-    crypto
-        .dangerous()
-        .set_certificate_verifier(Arc::new(CertificateVerifier));
-
-    let conf = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
-    endpoint.set_default_client_config(conf);
-
-    let target_addr: SocketAddr = "127.0.0.1:2700".parse()?;
-    let conn = endpoint.connect(target_addr, "localhost")?.await?;
-    info!("Connected to {target_addr}");
-
-    let (mut send, mut recv) = conn.open_bi().await?;
-    send_msg(&mut send, Message::Ping).await?;
-
-    let resp = recv_msg(&mut recv).await?;
-
-    match resp {
-        Message::Pong => {
-            info!("Got PONG");
-        }
-
-        other => {
-            error!(?other, "Something weird happened...");
-        }
-    }
-
-    send_msg(&mut send, Message::Ping).await?;
-
-    let resp = recv_msg(&mut recv).await?;
-
-    match resp {
-        Message::Pong => {
-            info!("Got PONG 2");
-        }
-
-        other => {
-            error!(?other, "Something weird happened...");
-        }
-    }
+    let client = Client::new("127.0.0.1:2700".to_string(), SecretString::from("amogus"))?;
+    client.run().await?;
 
     Ok(())
 }
