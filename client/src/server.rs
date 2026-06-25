@@ -1,5 +1,6 @@
 pub mod data;
 
+use crate::errors::ConnectionLimitError;
 use crate::server::data::ServerData;
 use crate::util::verify_password;
 use anyhow::{Result, anyhow};
@@ -12,10 +13,15 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tracing::{Instrument, debug, debug_span, error, info, info_span, instrument, warn};
 
 pub const DEFAULT_CERT_PATH: &str = "cert.pem";
 pub const DEFAULT_KEY_PATH: &str = "key.pem";
+pub const MAX_TOTAL_CONNECTIONS: usize = 1000;
+pub const MAX_CONNECTIONS_PER_IP: usize = 10;
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 
 fn dump_cert(cert: &CertifiedKey<KeyPair>) -> Result<()> {
     fs::write(DEFAULT_CERT_PATH, cert.cert.pem())?;
@@ -86,7 +92,26 @@ impl Server {
         info!("Server successfully started! Listening on {}", self.addr);
         while let Some(incoming) = self.endpoint.accept().await {
             let span = info_span!("connection", addr = %incoming.remote_address());
+            let ip = incoming.remote_address().ip();
+            if let Err(e) = self.data.inc_connections(&ip).await {
+                match e {
+                    ConnectionLimitError::Global => {
+                        error!(
+                            "Global connection limit exceeded, no more connections will be accepted until some are closed"
+                        );
+                        incoming.refuse();
+                    }
+                    ConnectionLimitError::Individual => {
+                        warn!(
+                            "Individual connection limit exceeded, no more connections are accepted from it"
+                        );
+                        incoming.refuse();
+                    }
+                }
+                continue;
+            }
             let data = self.data.clone();
+            let data_finalize = self.data.clone();
             tokio::spawn(
                 async move {
                     match incoming.await {
@@ -100,6 +125,7 @@ impl Server {
                             error!(error = %e, "Error accepting connection");
                         }
                     }
+                    data_finalize.dec_connections(&ip).await;
                 }
                 .instrument(span),
             );
@@ -131,6 +157,8 @@ impl ConnectionHandler {
                 return;
             }
         }
+
+        // TODO: the client might not open any streams afterwards, so we will need to timeout
         while let Ok((send, recv)) = self.connection.accept_bi().await {
             debug!("Accepting stream");
             tokio::spawn(async move {
@@ -138,6 +166,7 @@ impl ConnectionHandler {
                 handler.handle().await;
             });
         }
+        // TODO: uni handler
     }
 
     async fn auth(&mut self) -> Result<()> {
@@ -147,8 +176,8 @@ impl ConnectionHandler {
             .accept_bi()
             .await
             .map_err(|_| anyhow!("Stream closed"))?;
-        let msg = recv_msg(&mut recv)
-            .await
+        let msg = tokio::time::timeout(AUTH_TIMEOUT, recv_msg(&mut recv))
+            .await?
             .map_err(|_| anyhow!("Stream closed"))?;
 
         let err_object: anyhow::Error;

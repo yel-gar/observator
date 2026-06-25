@@ -296,6 +296,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "sha2",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

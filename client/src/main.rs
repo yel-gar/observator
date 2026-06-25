@@ -1,3 +1,4 @@
+pub mod errors;
 mod server;
 mod util;
 
