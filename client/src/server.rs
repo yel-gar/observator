@@ -1,15 +1,18 @@
 pub mod data;
 
 use crate::server::data::ServerData;
+use crate::util::verify_password;
 use anyhow::{Result, anyhow};
 use common::messages::{Message, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
-use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use tracing::{Instrument, debug, error, info, info_span, instrument};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{Instrument, debug, debug_span, error, info, info_span, instrument, warn};
 
 pub const DEFAULT_CERT_PATH: &str = "cert.pem";
 pub const DEFAULT_KEY_PATH: &str = "key.pem";
@@ -61,7 +64,7 @@ pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<S
 struct Server {
     addr: SocketAddr,
     endpoint: Endpoint,
-    data: ServerData,
+    data: Arc<ServerData>,
 }
 
 impl Server {
@@ -70,7 +73,7 @@ impl Server {
         Ok(Server {
             addr,
             endpoint: Endpoint::server(conf, addr)?,
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -82,13 +85,14 @@ impl Server {
     async fn internal_loop(&self) {
         info!("Server successfully started! Listening on {}", self.addr);
         while let Some(incoming) = self.endpoint.accept().await {
-            let span = info_span!("Incoming connection", addr = %incoming.remote_address());
+            let span = info_span!("connection", addr = %incoming.remote_address());
+            let data = self.data.clone();
             tokio::spawn(
                 async move {
                     match incoming.await {
                         Ok(conn) => {
                             info!("Accepted connection");
-                            let handler = ConnectionHandler::new(conn);
+                            let handler = ConnectionHandler::new(conn, data);
                             handler.handle().await;
                             info!("Connection terminated")
                         }
@@ -105,16 +109,28 @@ impl Server {
 
 struct ConnectionHandler {
     connection: Connection,
+    data: Arc<ServerData>,
 }
 
 impl ConnectionHandler {
-    fn new(connection: Connection) -> Self {
-        Self { connection }
+    fn new(connection: Connection, data: Arc<ServerData>) -> Self {
+        Self { connection, data }
     }
 
-    #[instrument(skip(self), fields(addr = %self.connection.remote_address()))]
-    async fn handle(self) {
+    #[instrument(skip(self))]
+    async fn handle(mut self) {
         debug!("Beginning connection handling");
+        match self.auth().await {
+            Ok(_) => {
+                debug!("Auth successful");
+            }
+            Err(e) => {
+                debug!(%e, "Error authenticating");
+                self.connection
+                    .close(VarInt::from_u32(403), b"Failed to authenticate");
+                return;
+            }
+        }
         while let Ok((send, recv)) = self.connection.accept_bi().await {
             debug!("Accepting stream");
             tokio::spawn(async move {
@@ -122,6 +138,51 @@ impl ConnectionHandler {
                 handler.handle().await;
             });
         }
+    }
+
+    async fn auth(&mut self) -> Result<()> {
+        debug!("Waiting for authentication...");
+        let (mut send, mut recv) = self
+            .connection
+            .accept_bi()
+            .await
+            .map_err(|_| anyhow!("Stream closed"))?;
+        let msg = recv_msg(&mut recv)
+            .await
+            .map_err(|_| anyhow!("Stream closed"))?;
+
+        let err_object: anyhow::Error;
+        let err_msg: &str;
+
+        let span = debug_span!("auth", ?msg);
+        let _guard = span.enter();
+        match msg {
+            Message::Hello(password) => match self.data.verify_password(password.as_str()) {
+                Ok(true) => {
+                    send_msg(&mut send, Message::Authenticated).await?;
+                    return Ok(());
+                }
+                Ok(false) => {
+                    warn!("Provided password does not match");
+                    err_msg = "Invalid password";
+                    err_object = anyhow!("Password mismatch");
+                }
+                Err(e) => {
+                    warn!("Error verifying password: {e}");
+                    err_msg = "Server error";
+                    err_object = anyhow!("Password verification error");
+                }
+            },
+            _ => {
+                warn!("Got non-HELLO message on auth stage");
+                err_msg = "You must authenticate first";
+                err_object = anyhow!("Bad message");
+            }
+        }
+
+        let _ = send_msg(&mut send, Message::Error(err_msg.to_string())).await;
+
+        Err(err_object)
     }
 }
 
@@ -146,7 +207,7 @@ impl StreamHandler {
                 });
             }
         }
-        debug!("Finished stream handling");
+        debug!("Stream closed");
     }
 }
 
@@ -166,9 +227,11 @@ pub async fn run_server(
 async fn process_message(m: Message) -> Option<Message> {
     debug!(?m, "Received message");
     match m {
-        Message::PING => Some(Message::PONG),
-        Message::PONG => None,
-        Message::ACK => None,
-        Message::ERROR(_) => None,
+        Message::Ping => Some(Message::Pong),
+        Message::Pong => None,
+        Message::Ack => None,
+        Message::Error(_) => None,
+        Message::Authenticated => None,
+        Message::Hello(_) => Some(Message::Error("You are already authenticated".to_string())),
     }
 }

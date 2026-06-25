@@ -8,10 +8,17 @@ const MAX_RECV_MESSAGE_SIZE: u32 = 1024 * 1024 * 10; // 10 Mb
 
 #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
 pub enum Message {
-    PING,
-    PONG,
-    ACK,
-    ERROR(String),
+    // Shared
+    Ping,
+    Pong,
+    Ack,
+    Error(String),
+
+    // Client
+    Hello(String), // password
+
+    // Server
+    Authenticated,
 }
 
 impl Message {

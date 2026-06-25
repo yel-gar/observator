@@ -38,12 +38,12 @@ async fn main() -> Result<()> {
     info!("Connected to {target_addr}");
 
     let (mut send, mut recv) = conn.open_bi().await?;
-    send_msg(&mut send, Message::PING).await?;
+    send_msg(&mut send, Message::Ping).await?;
 
     let resp = recv_msg(&mut recv).await?;
 
     match resp {
-        Message::PONG => {
+        Message::Pong => {
             info!("Got PONG");
         }
 
@@ -52,12 +52,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    send_msg(&mut send, Message::PING).await?;
+    send_msg(&mut send, Message::Ping).await?;
 
     let resp = recv_msg(&mut recv).await?;
 
     match resp {
-        Message::PONG => {
+        Message::Pong => {
             info!("Got PONG 2");
         }
 
