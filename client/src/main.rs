@@ -1,3 +1,4 @@
+mod audio;
 mod discovery;
 mod errors;
 mod server;
@@ -65,7 +66,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::new("debug").add_directive("pulseaudio=info".parse()?))
         .init();
     let args = Args::parse();
 

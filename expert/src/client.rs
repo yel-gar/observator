@@ -1,12 +1,15 @@
+use crate::audio::init_audio_recorder;
 use crate::certs::CertificateVerifier;
 use anyhow::{Result, anyhow};
-use common::messages::{Message, recv_msg, send_msg};
+use common::constants::{AUDIO_PACKET_BUFFER_SIZE, AUDIO_QUEUE_BUFFER_SIZE, VoicePacketBuf};
+use common::messages::{Message, VoicePacket, recv_msg, send_msg};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use secrecy::{ExposeSecret, SecretString};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, instrument};
+use std::time::Duration;
+use tracing::{debug, error, info, instrument};
 
 struct BiStream {
     pub send: SendStream,
@@ -80,11 +83,49 @@ impl Client {
     }
 
     async fn handle_control(stream: BiStream) {
-        todo!()
+        info!("Handling control (there's nothing no handle currently :D)");
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
-    async fn handle_data(send: SendStream) {
-        todo!()
+    async fn handle_data(mut send: SendStream) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<i16>(AUDIO_QUEUE_BUFFER_SIZE);
+        let _stream = match init_audio_recorder(tx) {
+            Ok(stream) => {
+                info!("Recorder initialization complete");
+                stream
+            }
+            Err(e) => {
+                error!("Failed to initialize audio recorder: {e}");
+                return;
+            }
+        };
+
+        let mut buf: VoicePacketBuf = [0; AUDIO_PACKET_BUFFER_SIZE];
+        let mut cur = 0usize;
+        loop {
+            if let Some(sample) = rx.recv().await {
+                buf[cur] = sample;
+                cur += 1;
+                if cur >= AUDIO_PACKET_BUFFER_SIZE {
+                    if let Err(e) = Self::send_voice_packet(&mut send, buf).await {
+                        error!("Voice stream closed: {e}");
+                        return;
+                    }
+                    cur = 0;
+                }
+            }
+        }
+    }
+
+    async fn send_voice_packet(send: &mut SendStream, buf: VoicePacketBuf) -> Result<()> {
+        let packet_bytes = VoicePacket { packet: buf }.serialize()?;
+        send.write_all(&(packet_bytes.len() as u32).to_be_bytes())
+            .await?;
+        send.write_all(&packet_bytes).await?;
+
+        Ok(())
     }
 
     async fn connect(&mut self) -> Result<()> {

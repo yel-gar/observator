@@ -1,10 +1,12 @@
 pub mod data;
 
+use crate::audio::init_audio;
 use crate::errors::ConnectionLimitError;
 use crate::server::data::ServerData;
 use crate::util::verify_password;
 use anyhow::{Result, anyhow};
-use common::messages::{Message, recv_msg, send_msg};
+use common::constants::AUDIO_QUEUE_BUFFER_SIZE;
+use common::messages::{Message, VoicePacket, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
@@ -89,6 +91,16 @@ impl Server {
     }
 
     async fn internal_loop(&self) {
+        // Init audio backend
+        let (tx, rx) = tokio::sync::mpsc::channel::<i16>(AUDIO_QUEUE_BUFFER_SIZE);
+        let _stream = match init_audio(rx) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(%e, "Failed to initialize audio");
+                return;
+            }
+        };
+
         info!("Server successfully started! Listening on {}", self.addr);
         while let Some(incoming) = self.endpoint.accept().await {
             let span = info_span!("connection", addr = %incoming.remote_address());
@@ -112,12 +124,13 @@ impl Server {
             }
             let data = self.data.clone();
             let data_finalize = self.data.clone();
+            let audio_tx = tx.clone();
             tokio::spawn(
                 async move {
                     match incoming.await {
                         Ok(conn) => {
                             info!("Accepted connection");
-                            let handler = ConnectionHandler::new(conn, data);
+                            let handler = ConnectionHandler::new(conn, data, audio_tx);
                             handler.handle().await;
                             info!("Connection terminated")
                         }
@@ -136,11 +149,20 @@ impl Server {
 struct ConnectionHandler {
     connection: Connection,
     data: Arc<ServerData>,
+    audio_tx: tokio::sync::mpsc::Sender<i16>,
 }
 
 impl ConnectionHandler {
-    fn new(connection: Connection, data: Arc<ServerData>) -> Self {
-        Self { connection, data }
+    fn new(
+        connection: Connection,
+        data: Arc<ServerData>,
+        audio_tx: tokio::sync::mpsc::Sender<i16>,
+    ) -> Self {
+        Self {
+            connection,
+            data,
+            audio_tx,
+        }
     }
 
     #[instrument(skip(self))]
@@ -158,15 +180,28 @@ impl ConnectionHandler {
             }
         }
 
+        let c1 = self.connection.clone();
+        let c2 = self.connection.clone();
+
         // TODO: the client might not open any streams afterwards, so we will need to timeout
-        while let Ok((send, recv)) = self.connection.accept_bi().await {
-            debug!("Accepting stream");
-            tokio::spawn(async move {
-                let handler = StreamHandler::new(recv, send);
+        let control = tokio::spawn(async move {
+            while let Ok((send, recv)) = c1.accept_bi().await {
+                debug!("Accepting control stream");
+                tokio::spawn(async move {
+                    let handler = ControlStreamHandler::new(recv, send);
+                    handler.handle().await;
+                });
+            }
+        });
+        let voice = tokio::spawn(async move {
+            while let Ok(recv) = c2.accept_uni().await {
+                debug!("Accepting voice stream");
+                let handler = AudioStreamHandler::new(recv, self.audio_tx.clone());
                 handler.handle().await;
-            });
-        }
-        // TODO: uni handler
+            }
+        });
+
+        let _ = tokio::join!(control, voice);
     }
 
     async fn auth(&mut self) -> Result<()> {
@@ -215,17 +250,17 @@ impl ConnectionHandler {
     }
 }
 
-struct StreamHandler {
+struct ControlStreamHandler {
     recv: RecvStream,
     send: SendStream,
 }
 
-impl StreamHandler {
+impl ControlStreamHandler {
     fn new(recv: RecvStream, send: SendStream) -> Self {
         Self { recv, send }
     }
 
-    #[instrument(skip(self), fields(stream_id = %self.recv.id()))]
+    #[instrument(skip(self))]
     async fn handle(mut self) {
         while let Ok(msg) = recv_msg(&mut self.recv).await {
             debug!(?msg, "Received message");
@@ -237,6 +272,39 @@ impl StreamHandler {
             }
         }
         debug!("Stream closed");
+    }
+}
+
+struct AudioStreamHandler {
+    recv: RecvStream,
+    tx: tokio::sync::mpsc::Sender<i16>,
+}
+
+impl AudioStreamHandler {
+    fn new(recv: RecvStream, tx: tokio::sync::mpsc::Sender<i16>) -> Self {
+        Self { recv, tx }
+    }
+
+    #[instrument(skip(self))]
+    async fn handle(self) {
+        if let Err(e) = self.handle_internal().await {
+            error!(%e, "Error handling audio stream");
+        }
+        debug!("Audio handler closed");
+    }
+
+    async fn handle_internal(mut self) -> Result<()> {
+        loop {
+            let mut buf = [0u8; 4];
+            self.recv.read_exact(&mut buf).await?;
+            let mut buf = vec![0u8; u32::from_be_bytes(buf) as usize];
+            self.recv.read_exact(buf.as_mut()).await?;
+
+            let packet = VoicePacket::deserialize(&buf)?;
+            for p in packet.packet {
+                self.tx.send(p).await?;
+            }
+        }
     }
 }
 

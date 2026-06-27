@@ -1,3 +1,4 @@
+use crate::constants::VoicePacketBuf;
 use crate::errors::{MessageRecvError, MessageSendError};
 use quinn::{RecvStream, SendStream};
 use std::time::Duration;
@@ -45,6 +46,20 @@ impl DiscoveryMessage {
     }
 
     pub fn deserialize(data: &[u8]) -> ReadResult<DiscoveryMessage> {
+        wincode::deserialize(data)
+    }
+}
+
+#[derive(SchemaWrite, SchemaRead)]
+pub struct VoicePacket {
+    pub packet: VoicePacketBuf,
+}
+
+impl VoicePacket {
+    pub fn serialize(&self) -> WriteResult<Vec<u8>> {
+        wincode::serialize(self)
+    }
+    pub fn deserialize(data: &[u8]) -> ReadResult<VoicePacket> {
         wincode::deserialize(data)
     }
 }

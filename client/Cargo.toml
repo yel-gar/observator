@@ -14,7 +14,8 @@ rcgen = "0.14.8"
 rustls = "0.23.40"
 anyhow = "1.0.102"
 rustls-pemfile = "2.2.0"
-sha2 = "0.11.0"
 rpassword = "7.5.4"
 argon2 = { version = "0.5.3",features = ["std"] }
 thiserror = "2.0.18"
+log = "0.4.33"
+cpal = { version = "0.18.1", features = ["pulseaudio"] }

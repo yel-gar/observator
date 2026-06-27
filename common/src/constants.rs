@@ -1,2 +1,6 @@
 pub const DISCOVERY_HEADER: &[u8] = b"OBSERVER_CLIENT_DISCOVERY";
 pub const SERVER_INFO_HEADER: &[u8] = b"OBSERVER_SERVER_INFO";
+pub const AUDIO_QUEUE_BUFFER_SIZE: usize = 8;
+pub const AUDIO_PACKET_BUFFER_SIZE: usize = 1024;
+
+pub type VoicePacketBuf = [i16; AUDIO_PACKET_BUFFER_SIZE];

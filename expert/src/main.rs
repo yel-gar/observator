@@ -1,3 +1,4 @@
+mod audio;
 mod certs;
 mod client;
 mod discovery;
@@ -11,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::new("debug").add_directive("pulseaudio=info".parse()?))
         .init();
     default_provider()
         .install_default()
