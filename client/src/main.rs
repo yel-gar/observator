@@ -1,7 +1,9 @@
-pub mod errors;
+mod discovery;
+mod errors;
 mod server;
 mod util;
 
+use crate::discovery::discovery_listener;
 use crate::server::data::ServerData;
 use crate::server::{
     DEFAULT_CERT_PATH, DEFAULT_KEY_PATH, make_config, make_config_from_certs, run_server,
@@ -12,7 +14,7 @@ use argon2::PasswordHash;
 use clap::Parser;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::{fs, io};
 use tracing::{debug, info};
@@ -25,6 +27,19 @@ struct Args {
 
     #[arg(short, long, default_value_t = 2700)]
     port: u16,
+
+    #[arg(
+        short,
+        help = "Host to which to bind the discovery service. Defaults to --host."
+    )]
+    discovery_host: Option<IpAddr>,
+
+    #[arg(
+        long,
+        default_value_t = 2701,
+        help = "Port on which UDP discovery socket will be running. Keep it same for all clients."
+    )]
+    discovery_port: u16,
 
     #[arg(long, help = "Path to certificate file")]
     cert: Option<PathBuf>,
@@ -83,7 +98,14 @@ async fn main() -> Result<()> {
         }
     };
 
+    let discovery_host = args.discovery_host.unwrap_or(args.host);
+    let discovery_task = tokio::spawn(discovery_listener(
+        SocketAddr::new(discovery_host, args.discovery_port),
+        args.port,
+    ));
     run_server(conf, args.host, args.port, server_data).await?;
+    discovery_task.abort();
+    let _ = discovery_task.await;
 
     Ok(())
 }

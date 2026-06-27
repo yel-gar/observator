@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult};
 
+pub const PROTOCOL_VERSION: u16 = 1;
 const MAX_RECV_MESSAGE_SIZE: u32 = 1024 * 1024 * 10; // 10 Mb
 
 #[derive(SchemaWrite, SchemaRead, PartialEq, Debug)]
@@ -27,6 +28,23 @@ impl Message {
     }
 
     fn deserialize(data: &[u8]) -> ReadResult<Message> {
+        wincode::deserialize(data)
+    }
+}
+
+#[derive(SchemaWrite, SchemaRead, Debug)]
+pub enum DiscoveryMessage {
+    Discover { version: u16 },
+
+    ServerInfo { version: u16, quic_port: u16 },
+}
+
+impl DiscoveryMessage {
+    pub fn serialize(&self) -> WriteResult<Vec<u8>> {
+        wincode::serialize(self)
+    }
+
+    pub fn deserialize(data: &[u8]) -> ReadResult<DiscoveryMessage> {
         wincode::deserialize(data)
     }
 }

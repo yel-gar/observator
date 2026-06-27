@@ -1,5 +1,6 @@
-pub mod certs;
-pub mod client;
+mod certs;
+mod client;
+mod discovery;
 
 use crate::client::Client;
 use anyhow::Result;
