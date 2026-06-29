@@ -38,12 +38,12 @@ where
     T: Sample + SizedSample,
     i16: FromSample<T>,
 {
+    let mut buf: VoicePacketBuf = [0; AUDIO_PACKET_BUFFER_SIZE];
+    let mut cur = 0usize;
     device
         .build_input_stream(
             config,
             move |data: &[T], _| {
-                let mut buf: VoicePacketBuf = [0; AUDIO_PACKET_BUFFER_SIZE];
-                let mut cur = 0usize;
                 for &sample in data {
                     let s = i16::from_sample(sample);
                     buf[cur] = s;
