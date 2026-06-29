@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 struct BiStream {
     pub send: SendStream,
@@ -82,15 +82,22 @@ impl Client {
         Ok(())
     }
 
-    async fn handle_control(stream: BiStream) {
+    async fn handle_control(mut stream: BiStream) {
         info!("Handling control (there's nothing no handle currently :D)");
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            debug!("Pinging");
+            let _ = send_msg(&mut stream.send, Message::Ping).await;
+            if let Ok(resp) = recv_msg(&mut stream.recv).await {
+                debug!(?resp, "Ponged");
+            } else {
+                warn!("Something went wrong")
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
     async fn handle_data(mut send: SendStream) {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<i16>(AUDIO_QUEUE_BUFFER_SIZE);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<VoicePacket>(AUDIO_QUEUE_BUFFER_SIZE);
         let _stream = match init_audio_recorder(tx) {
             Ok(stream) => {
                 info!("Recorder initialization complete");
@@ -102,25 +109,18 @@ impl Client {
             }
         };
 
-        let mut buf: VoicePacketBuf = [0; AUDIO_PACKET_BUFFER_SIZE];
-        let mut cur = 0usize;
         loop {
-            if let Some(sample) = rx.recv().await {
-                buf[cur] = sample;
-                cur += 1;
-                if cur >= AUDIO_PACKET_BUFFER_SIZE {
-                    if let Err(e) = Self::send_voice_packet(&mut send, buf).await {
-                        error!("Voice stream closed: {e}");
-                        return;
-                    }
-                    cur = 0;
+            if let Some(packet) = rx.recv().await {
+                if let Err(e) = Self::send_voice_packet(&mut send, packet).await {
+                    error!("Voice stream closed: {e}");
+                    return;
                 }
             }
         }
     }
 
-    async fn send_voice_packet(send: &mut SendStream, buf: VoicePacketBuf) -> Result<()> {
-        let packet_bytes = VoicePacket { packet: buf }.serialize()?;
+    async fn send_voice_packet(send: &mut SendStream, packet: VoicePacket) -> Result<()> {
+        let packet_bytes = packet.serialize()?;
         send.write_all(&(packet_bytes.len() as u32).to_be_bytes())
             .await?;
         send.write_all(&packet_bytes).await?;
@@ -167,6 +167,7 @@ impl Client {
     async fn open_streams(&mut self) -> Result<()> {
         self.open_control().await?;
         self.auth_connection().await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         self.open_data().await?;
         Ok(())
     }

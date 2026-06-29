@@ -1,11 +1,13 @@
 use anyhow::anyhow;
+use common::constants::{AUDIO_PACKET_BUFFER_SIZE, VoicePacketBuf};
+use common::messages::VoicePacket;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
     Device, FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, default_host,
 };
 use tracing::{error, info};
 
-pub fn init_audio_recorder(tx: tokio::sync::mpsc::Sender<i16>) -> anyhow::Result<Stream> {
+pub fn init_audio_recorder(tx: tokio::sync::mpsc::Sender<VoicePacket>) -> anyhow::Result<Stream> {
     let host = default_host();
     let device = host
         .default_input_device()
@@ -30,7 +32,7 @@ pub fn init_audio_recorder(tx: tokio::sync::mpsc::Sender<i16>) -> anyhow::Result
 fn build_stream<T>(
     device: Device,
     config: StreamConfig,
-    tx: tokio::sync::mpsc::Sender<i16>,
+    tx: tokio::sync::mpsc::Sender<VoicePacket>,
 ) -> anyhow::Result<Stream>
 where
     T: Sample + SizedSample,
@@ -40,10 +42,16 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _| {
+                let mut buf: VoicePacketBuf = [0; AUDIO_PACKET_BUFFER_SIZE];
+                let mut cur = 0usize;
                 for &sample in data {
                     let s = i16::from_sample(sample);
-                    let _ = tx.try_send(s);
-                    // TODO: process VoicePacket instead of samples
+                    buf[cur] = s;
+                    cur += 1;
+                    if cur >= AUDIO_PACKET_BUFFER_SIZE {
+                        let _ = tx.try_send(VoicePacket { packet: buf });
+                        cur = 0;
+                    }
                 }
             },
             |e| {

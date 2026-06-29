@@ -320,27 +320,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "clap",
- "common",
- "cpal",
- "log",
- "quinn",
- "rcgen",
- "rpassword",
- "rustls",
- "rustls-pemfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,6 +1765,27 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "speaker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "clap",
+ "common",
+ "cpal",
+ "log",
+ "quinn",
+ "rcgen",
+ "rpassword",
+ "rustls",
+ "rustls-pemfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

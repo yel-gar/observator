@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use common::constants::AUDIO_QUEUE_BUFFER_SIZE;
 use common::messages::{Message, VoicePacket, recv_msg, send_msg};
 use common::utils::log_cert_fingerprint;
-use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt};
 use rcgen::{CertifiedKey, KeyPair, generate_simple_self_signed};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, debug_span, error, info, info_span, instrument, warn};
 
 pub const DEFAULT_CERT_PATH: &str = "cert.pem";
@@ -32,6 +33,13 @@ fn dump_cert(cert: &CertifiedKey<KeyPair>) -> Result<()> {
     Ok(())
 }
 
+fn set_transport(mut conf: ServerConfig) -> ServerConfig {
+    let mut transport = TransportConfig::default();
+    transport.max_concurrent_uni_streams(1u32.into());
+    conf.transport_config(Arc::new(transport));
+    conf
+}
+
 pub fn make_config() -> Result<ServerConfig> {
     let cert = generate_simple_self_signed(vec!["localhost".to_string()])?;
     dump_cert(&cert)?;
@@ -45,7 +53,7 @@ pub fn make_config() -> Result<ServerConfig> {
         rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
     )?;
 
-    Ok(conf)
+    Ok(set_transport(conf))
 }
 
 pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<ServerConfig> {
@@ -66,7 +74,7 @@ pub fn make_config_from_certs(cert_path: PathBuf, key_path: PathBuf) -> Result<S
     }
     let conf = ServerConfig::with_single_cert(certs, key)?;
 
-    Ok(conf)
+    Ok(set_transport(conf))
 }
 
 struct Server {
@@ -92,7 +100,7 @@ impl Server {
 
     async fn internal_loop(&self) {
         // Init audio backend
-        let (tx, rx) = tokio::sync::mpsc::channel::<i16>(AUDIO_QUEUE_BUFFER_SIZE);
+        let (tx, rx) = tokio::sync::mpsc::channel::<VoicePacket>(AUDIO_QUEUE_BUFFER_SIZE);
         let _stream = match init_audio(rx) {
             Ok(s) => s,
             Err(e) => {
@@ -149,14 +157,14 @@ impl Server {
 struct ConnectionHandler {
     connection: Connection,
     data: Arc<ServerData>,
-    audio_tx: tokio::sync::mpsc::Sender<i16>,
+    audio_tx: tokio::sync::mpsc::Sender<VoicePacket>,
 }
 
 impl ConnectionHandler {
     fn new(
         connection: Connection,
         data: Arc<ServerData>,
-        audio_tx: tokio::sync::mpsc::Sender<i16>,
+        audio_tx: tokio::sync::mpsc::Sender<VoicePacket>,
     ) -> Self {
         Self {
             connection,
@@ -168,9 +176,10 @@ impl ConnectionHandler {
     #[instrument(skip(self))]
     async fn handle(mut self) {
         debug!("Beginning connection handling");
-        match self.auth().await {
-            Ok(_) => {
+        let auth = match self.auth().await {
+            Ok(auth) => {
                 debug!("Auth successful");
+                auth
             }
             Err(e) => {
                 debug!(%e, "Error authenticating");
@@ -178,13 +187,14 @@ impl ConnectionHandler {
                     .close(VarInt::from_u32(403), b"Failed to authenticate");
                 return;
             }
-        }
+        };
 
         let c1 = self.connection.clone();
         let c2 = self.connection.clone();
 
         // TODO: the client might not open any streams afterwards, so we will need to timeout
         let control = tokio::spawn(async move {
+            debug!("Control handler spawned");
             while let Ok((send, recv)) = c1.accept_bi().await {
                 debug!("Accepting control stream");
                 tokio::spawn(async move {
@@ -192,19 +202,22 @@ impl ConnectionHandler {
                     handler.handle().await;
                 });
             }
+            debug!("Done accepting control streams");
         });
         let voice = tokio::spawn(async move {
+            debug!("Voice handler spawned");
             while let Ok(recv) = c2.accept_uni().await {
                 debug!("Accepting voice stream");
                 let handler = AudioStreamHandler::new(recv, self.audio_tx.clone());
                 handler.handle().await;
             }
+            debug!("Done accepting voice streams");
         });
 
-        let _ = tokio::join!(control, voice);
+        let _ = tokio::join!(auth, control, voice);
     }
 
-    async fn auth(&mut self) -> Result<()> {
+    async fn auth(&mut self) -> Result<JoinHandle<()>> {
         debug!("Waiting for authentication...");
         let (mut send, mut recv) = self
             .connection
@@ -224,7 +237,12 @@ impl ConnectionHandler {
             Message::Hello(password) => match self.data.verify_password(password.as_str()) {
                 Ok(true) => {
                     send_msg(&mut send, Message::Authenticated).await?;
-                    return Ok(());
+                    let handle = tokio::spawn(async move {
+                        debug!("Delegating auth stream to controller");
+                        let handler = ControlStreamHandler::new(recv, send);
+                        handler.handle().await;
+                    });
+                    return Ok(handle);
                 }
                 Ok(false) => {
                     warn!("Provided password does not match");
@@ -262,6 +280,7 @@ impl ControlStreamHandler {
 
     #[instrument(skip(self))]
     async fn handle(mut self) {
+        debug!("Beginning handling of control stream");
         while let Ok(msg) = recv_msg(&mut self.recv).await {
             debug!(?msg, "Received message");
             let response = process_message(msg).await;
@@ -277,16 +296,17 @@ impl ControlStreamHandler {
 
 struct AudioStreamHandler {
     recv: RecvStream,
-    tx: tokio::sync::mpsc::Sender<i16>,
+    tx: tokio::sync::mpsc::Sender<VoicePacket>,
 }
 
 impl AudioStreamHandler {
-    fn new(recv: RecvStream, tx: tokio::sync::mpsc::Sender<i16>) -> Self {
+    fn new(recv: RecvStream, tx: tokio::sync::mpsc::Sender<VoicePacket>) -> Self {
         Self { recv, tx }
     }
 
     #[instrument(skip(self))]
     async fn handle(self) {
+        debug!("Beginning handling of audio stream");
         if let Err(e) = self.handle_internal().await {
             error!(%e, "Error handling audio stream");
         }
@@ -301,9 +321,7 @@ impl AudioStreamHandler {
             self.recv.read_exact(buf.as_mut()).await?;
 
             let packet = VoicePacket::deserialize(&buf)?;
-            for p in packet.packet {
-                self.tx.send(p).await?;
-            }
+            self.tx.send(packet).await?;
         }
     }
 }
