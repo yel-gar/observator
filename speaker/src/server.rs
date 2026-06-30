@@ -1,6 +1,7 @@
 pub mod data;
 
-use crate::audio::init_audio;
+use std::collections::HashMap;
+use crate::audio::{init_audio, ReceiverList};
 use crate::errors::ConnectionLimitError;
 use crate::server::data::ServerData;
 use crate::util::verify_password;
@@ -14,8 +15,9 @@ use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, debug_span, error, info, info_span, instrument, warn};
 
@@ -81,6 +83,8 @@ struct Server {
     addr: SocketAddr,
     endpoint: Endpoint,
     data: Arc<ServerData>,
+    receivers: ReceiverList,
+    conn_id: AtomicU64
 }
 
 impl Server {
@@ -90,6 +94,8 @@ impl Server {
             addr,
             endpoint: Endpoint::server(conf, addr)?,
             data: Arc::new(data),
+            receivers: Arc::new(RwLock::new(HashMap::new())),
+            conn_id: AtomicU64::new(0),
         })
     }
 
@@ -100,8 +106,7 @@ impl Server {
 
     async fn internal_loop(&self) {
         // Init audio backend
-        let (tx, rx) = tokio::sync::mpsc::channel::<VoicePacket>(AUDIO_QUEUE_BUFFER_SIZE);
-        let _stream = match init_audio(rx) {
+        let _stream = match init_audio(self.receivers.clone()).await {
             Ok(s) => s,
             Err(e) => {
                 error!(%e, "Failed to initialize audio");
@@ -132,13 +137,13 @@ impl Server {
             }
             let data = self.data.clone();
             let data_finalize = self.data.clone();
-            let audio_tx = tx.clone();
+            let receivers = self.receivers.clone();
             tokio::spawn(
                 async move {
                     match incoming.await {
                         Ok(conn) => {
                             info!("Accepted connection");
-                            let handler = ConnectionHandler::new(conn, data, audio_tx);
+                            let handler = ConnectionHandler::new(conn, data, receivers);
                             handler.handle().await;
                             info!("Connection terminated")
                         }
@@ -157,19 +162,22 @@ impl Server {
 struct ConnectionHandler {
     connection: Connection,
     data: Arc<ServerData>,
-    audio_tx: tokio::sync::mpsc::Sender<VoicePacket>,
+    receivers: ReceiverList,
+    conn_id: u64
 }
 
 impl ConnectionHandler {
     fn new(
         connection: Connection,
         data: Arc<ServerData>,
-        audio_tx: tokio::sync::mpsc::Sender<VoicePacket>,
+        receivers: ReceiverList,
+        conn_id: u64
     ) -> Self {
         Self {
             connection,
             data,
-            audio_tx,
+            receivers,
+            conn_id
         }
     }
 
@@ -208,13 +216,18 @@ impl ConnectionHandler {
             debug!("Voice handler spawned");
             while let Ok(recv) = c2.accept_uni().await {
                 debug!("Accepting voice stream");
-                let handler = AudioStreamHandler::new(recv, self.audio_tx.clone());
+                let handler = AudioStreamHandler::new(recv, self.receivers.clone());
                 handler.handle().await;
             }
             debug!("Done accepting voice streams");
         });
 
         let _ = tokio::join!(auth, control, voice);
+    }
+
+    async fn make_channel(&self) -> tokio::sync::mpsc::Sender<()> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<VoicePacket>(AUDIO_QUEUE_BUFFER_SIZE);
+        let receivers =
     }
 
     async fn auth(&mut self) -> Result<JoinHandle<()>> {

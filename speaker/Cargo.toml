@@ -19,3 +19,4 @@ argon2 = { version = "0.5.3",features = ["std"] }
 thiserror = "2.0.18"
 log = "0.4.33"
 cpal = { version = "0.18.1", features = ["pulseaudio"] }
+ringbuf = "0.5.0"
